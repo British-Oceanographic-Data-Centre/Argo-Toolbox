@@ -1,0 +1,123 @@
+services:
+  file_checker_api:
+    container_name: argo-file-checker-api
+    image: ${FILECHECKERAPI_IMAGE}:${FILECHECKERAPI_IMAGE_TAG}
+    profiles:
+      - checker
+    environment:
+      - API_ROOT_PATH=/argo-toolbox/api/file-checker
+    user : "fileCheckerRunner"
+    cap_drop:
+      - ALL
+    networks:
+      - argo-toolbox
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  runtime-matlab:
+    container_name: decoder-runtime-matlab
+    image: ghcr.io/euroargodev/coriolis-data-processing-chain-for-argo-floats/runtime/matlab:R2022b
+    profiles:
+      - decoder
+    user: root
+    volumes:
+      - runtime-matlab-volume:/matlab/runtime:rw
+
+  decoder_api:
+    container_name: argo-decoder-api
+    image: ${ARGODECODERAPI_IMAGE}:${ARGODECODERAPI_IMAGE_TAG}
+    volumes:
+      - /home/lbruvryl/development/tmp/tmp_tc/matlab_runtime/R2022b:/mnt/runtime:ro
+      - runtime-cache:/mnt/runtime-cache:rw
+    entrypoint: ["uvicorn", "decoder_bindings.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/decoder_bindings"]
+    networks:
+      - argo-toolbox
+    profiles:
+      - decoder
+    environment:
+      - API_ROOT_PATH=/argo-toolbox/api/decoder
+    # user: "${DECODER_USER_UID}:${DECODER_USER_GID}"
+    # group_add:
+    #   - gbatch
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      runtime-matlab:
+        condition: service_started
+        required: false
+
+  jupyterlab:
+    build:
+      context: .
+      dockerfile: jupyter.Dockerfile
+      args: 
+        BASE_IMAGE: ${JUPYTERLAB_IMAGE:-quay.io/jupyter/datascience-notebook}:${JUPYTERLAB_IMAGE_TAG:-python-3.13}
+    container_name: jupyterlab
+    profiles:
+      - jupyter
+    environment:
+      - JUPYTER_PORT=${WEBSERVER_PORT}
+    user: "${JUPYTER_USER_UID}:100"
+    volumes:
+      - ./jupyter:/home/jovyan
+    cap_drop:
+      - ALL
+    networks:
+      - argo-toolbox
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${WEBSERVER_PORT}/argo-toolbox/jupyterlab/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    command: start-notebook.py --ServerApp.allow_remote_access=True --ServerApp.base_url=/argo-toolbox/jupyterlab/ --ServerApp.allow_origin='*'
+  
+  webserver :
+    container_name: argo-toolbox-webserver
+    image: nginxinc/nginx-unprivileged
+    ports:
+      - "${WEBSERVER_HOST:-127.0.0.1}:${WEBSERVER_PORT:-8080}:8080"
+    environment:
+      - WEBSERVER_PORT=${WEBSERVER_PORT}
+    volumes:      
+      - ./argo_nginx.conf.template:/etc/nginx/templates/argo_nginx.conf.template:ro
+    cap_drop:
+      - ALL
+    networks:
+      - argo-toolbox
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/nginx-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      decoder_api:
+        condition: service_healthy
+        required: false
+      file_checker_api:
+        condition: service_healthy
+        required: false
+      jupyterlab:
+        condition: service_healthy
+        required: false
+networks:
+  argo-toolbox: {}
+      
+volumes:
+  runtime-matlab-volume:
+  runtime-cache:
